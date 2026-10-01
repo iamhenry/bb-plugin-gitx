@@ -24,7 +24,7 @@ import {
   fetchAll,
   commitPush,
 } from "./git.ts";
-import { extLabel, fileParts, isTextPatch, statusBadge, syncCaption } from "./tree.ts";
+import { changeSections, extLabel, fileParts, isTextPatch, statusBadge, syncCaption } from "./tree.ts";
 import { watchGitState } from "./watch.ts";
 
 const exec = promisify(execFile);
@@ -94,6 +94,24 @@ test("parsePorcelain groups staged/unstaged/untracked/conflict", () => {
     ["conflict.txt"],
   );
   assert.equal(g.staged.find((f) => f.path === "renamed.txt")?.from, "old.txt");
+});
+
+test("change sections separate partial reviews, include untracked, and isolate conflicts", () => {
+  const state = groupFiles(parsePorcelain("M  staged.txt\nMM partial.txt\n M changed.txt\n?? new.txt\nUU conflict.txt"));
+  state.staged = state.staged.map((file) => ({ ...file, additions: 1, deletions: 0 }));
+  state.changes = state.changes.map((file) => ({ ...file, additions: 2, deletions: 0 }));
+  const sections = changeSections(state, "all");
+  assert.deepEqual(sections.map(({ label, entries }) => ({ label, paths: entries.map(({ file }) => file.path) })), [
+    { label: "Staged", paths: ["staged.txt", "partial.txt"] },
+    { label: "Unstaged", paths: ["partial.txt", "changed.txt", "new.txt"] },
+    { label: "Merge conflicts", paths: ["conflict.txt"] },
+  ]);
+  const partial = sections.flatMap(({ entries }) => entries).filter(({ file }) => file.path === "partial.txt");
+  assert.deepEqual(partial.map(({ group, file }) => [group, file.additions]), [["staged", 1], ["changes", 2]]);
+  assert.notEqual(partial[0].key, partial[1].key);
+  assert.deepEqual(changeSections(state, "staged"), [sections[0]]);
+  assert.deepEqual(changeSections(state, "unstaged"), [sections[1]]);
+  assert.deepEqual(changeSections({ staged: [], changes: [], untracked: [], conflicts: [] }, "all"), []);
 });
 
 test("syntheticAddPatch is a new-file unified diff", () => {

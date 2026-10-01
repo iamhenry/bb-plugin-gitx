@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/coarse-pointer-sizing";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
-import { extLabel, fileParts, isTextPatch, statusBadge, syncCaption } from "@/lib/tree.ts";
+import { changeSections, extLabel, fileParts, isTextPatch, statusBadge, syncCaption } from "@/lib/tree.ts";
 import { DEFAULT_WALKTHROUGH_PROMPT } from "@/lib/walkthrough-prompt.ts";
 import {
   GIT_STATE_CHANNEL,
@@ -36,7 +36,6 @@ import {
   type gitxRpc,
 } from "./contract.ts";
 
-type Change = { path: string; variants: { file: GitFile; group: FileGroup }[] };
 type DiffView = "unified" | "split";
 const ProviderModelPicker = experimental_ProviderModelPicker;
 
@@ -204,6 +203,7 @@ function SourceControl({
   const [error, setError] = useState<string | null>(null);
   const [scope, setScope] = useState<"all" | "staged" | "unstaged">("all");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => new Set());
   const [layout, setLayout] = useState<DiffView>("unified");
   const [overrides, setOverrides] = useState<Record<string, DiffView>>({});
   const [walkthroughOpen, setWalkthroughOpen] = useState(false);
@@ -325,23 +325,15 @@ function SourceControl({
           : "idle";
   const splitH = "h-9 max-md:pointer-coarse:h-10";
 
-  const changes = new Map<string, Change>();
-  const groups: FileGroup[] = scope === "staged" ? ["staged"] : scope === "unstaged" ? ["changes"] : ["staged", "changes", "untracked", "conflicts"];
-  for (const group of groups) {
-    for (const file of state[group]) {
-      const entry = changes.get(file.path) ?? { path: file.path, variants: [] };
-      entry.variants.push({ file, group });
-      changes.set(file.path, entry);
-    }
-  }
-  const visible = [...changes.values()];
+  const sections = changeSections(state, scope);
+  const visible = sections.flatMap((section) => section.entries);
   const allChangesCount = new Set(
     [...state.staged, ...state.changes, ...state.untracked, ...state.conflicts].map((file) => file.path),
   ).size;
   const stagedCount = new Set(state.staged.map((file) => file.path)).size;
-  const unstagedCount = new Set(state.changes.map((file) => file.path)).size;
-  const allExpanded = visible.length > 0 && visible.every((file) => expanded.has(file.path));
-  const allSplit = visible.length > 0 && visible.every((file) => (overrides[file.path] ?? layout) === "split");
+  const unstagedCount = new Set([...state.changes, ...state.untracked].map((file) => file.path)).size;
+  const allExpanded = visible.length > 0 && sections.every((section) => !collapsedSections.has(section.id)) && visible.every((entry) => expanded.has(entry.key));
+  const allSplit = visible.length > 0 && visible.every((entry) => (overrides[entry.key] ?? layout) === "split");
 
   const openChanges = () => changesRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
 
@@ -625,7 +617,10 @@ function SourceControl({
             </div>
             <Button
               type="button" size="sm" variant="ghost" disabled={visible.length === 0}
-              onClick={() => setExpanded(allExpanded ? new Set() : new Set(visible.map((entry) => entry.path)))}
+              onClick={() => {
+                setExpanded(allExpanded ? new Set() : new Set(visible.map((entry) => entry.key)));
+                if (!allExpanded) setCollapsedSections(new Set());
+              }}
             >
               {allExpanded ? "Collapse all" : "Expand all"}
             </Button>
@@ -641,10 +636,6 @@ function SourceControl({
               </Button>
             }>
               {(close) => <>
-                <MenuItem disabled={busy || state.staged.length === 0} onClick={() => { close(); void run(() => rpc.call("unstage", { ...ctx, paths: pathsOf("staged") })); }}>Unstage all</MenuItem>
-                <MenuItem disabled={busy || state.changes.length === 0} onClick={() => { close(); void run(() => rpc.call("stage", { ...ctx, paths: pathsOf("changes") })); }}>Stage all changes</MenuItem>
-                <MenuItem disabled={busy || state.untracked.length === 0} onClick={() => { close(); void run(() => rpc.call("stage", { ...ctx, paths: pathsOf("untracked") })); }}>Stage all untracked</MenuItem>
-                <div role="separator" className="my-1 border-t border-border" />
                 <MenuItem disabled={busy || state.changes.length === 0} onClick={() => { close(); setDiscarding({ paths: pathsOf("changes"), group: "changes" }); }}>Discard all changes</MenuItem>
                 <MenuItem disabled={busy || state.untracked.length === 0} onClick={() => { close(); setDiscarding({ paths: pathsOf("untracked"), group: "untracked" }); }}>Discard all untracked</MenuItem>
               </>}
@@ -666,62 +657,95 @@ function SourceControl({
               <Button type="button" size="sm" disabled>Generate</Button>
             </div>
           ) : null}
-          {visible.length === 0 ? <p className="p-3 text-sm text-muted-foreground">No changes in this scope</p> : null}
-          {visible.map(({ path, variants }) => {
-            const parts = fileParts(path);
-            const isOpen = expanded.has(path);
-            const view = overrides[path] ?? layout;
-            const deleted = variants.every(({ file }) => file.index === "D" || file.worktree === "D");
-            const additions = variants.reduce<number | null>((sum, { file }) => sum === null || file.additions == null ? null : sum + file.additions, 0);
-            const deletions = variants.reduce<number | null>((sum, { file }) => sum === null || file.deletions == null ? null : sum + file.deletions, 0);
-            return (
-              <div key={path} className="border-b border-border">
-                <div className="group flex items-center gap-1 px-2 py-1 text-sm hover:bg-state-hover">
-                  <button
-                    type="button" aria-expanded={isOpen} aria-label={`${isOpen ? "Collapse" : "Expand"} ${path}`}
-                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                    onClick={() => toggle(path)}
+          {visible.length === 0 ? <p className="p-3 text-sm text-muted-foreground">{allChangesCount === 0 ? "No changes" : "No changes in this scope"}</p> : null}
+          {sections.map((section) => (
+            <section key={section.id} aria-label={section.label}>
+              <div className="flex items-center gap-1 border-b border-border bg-muted/30 px-2 py-1">
+                <button
+                  type="button"
+                  aria-expanded={!collapsedSections.has(section.id)}
+                  aria-label={`${collapsedSections.has(section.id) ? "Expand" : "Collapse"} ${section.label} section`}
+                  className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-semibold"
+                  onClick={() => setCollapsedSections((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(section.id)) next.delete(section.id);
+                    else next.add(section.id);
+                    return next;
+                  })}
+                >
+                  <Icon name={collapsedSections.has(section.id) ? "ChevronRight" : "ChevronDown"} className="size-3 shrink-0" />
+                  {section.label}
+                  <span className="text-muted-foreground">{section.entries.length}</span>
+                </button>
+                {section.id !== "conflicts" ? (
+                  <Button
+                    type="button" size="sm" variant="ghost" disabled={busy}
+                    onClick={() => void run(() => rpc.call(section.id === "staged" ? "unstage" : "stage", {
+                      ...ctx, paths: section.entries.map(({ file }) => file.path),
+                    }))}
                   >
-                    <Icon name={isOpen ? "ChevronDown" : "ChevronRight"} className="size-3 shrink-0" />
-                    <span className="w-6 shrink-0 text-right font-mono text-[10px] text-sky-600 dark:text-sky-400">{extLabel(parts.name)}</span>
-                    <span className="min-w-0 truncate">{variants[0]?.file.from ? `${fileParts(variants[0].file.from!).name} → ` : ""}{parts.name}</span>
-                    <span className="truncate text-xs text-muted-foreground">{parts.dir}</span>
-                  </button>
-                  <span
-                    className="flex shrink-0 gap-1 font-mono text-[10px]"
-                    aria-label={`${path}: ${additions ?? "unknown"} additions, ${deletions ?? "unknown"} deletions`}
-                    title={additions === null || deletions === null ? "Line counts unavailable for binary or conflicted changes" : undefined}
-                  >
-                    <span className="text-emerald-600 dark:text-emerald-400">+{additions ?? "?"}</span>
-                    <span className="text-red-600 dark:text-red-400">-{deletions ?? "?"}</span>
-                  </span>
-                  {variants.map(({ file, group }) => rowActions(file, group))}
-                  <IconBtn
-                    label={`Edit ${path} in preferred editor`} name="EditFile" disabled={deleted}
-                    onClick={() => void editFile(path)}
-                  />
-                  <IconBtn
-                    label={`${view === "unified" ? "Split" : "Inline"} ${path}`}
-                    name={view === "unified" ? "Columns2" : "AlignLeft"}
-                    onClick={() => setOverrides((prev) => ({ ...prev, [path]: view === "unified" ? "split" : "unified" }))}
-                  />
-                  <span className={cn("w-8 shrink-0 text-right font-mono text-[10px]", letterClass(statusBadge(variants[0].file, variants[0].group)))}>
-                    {statusBadge(variants[0].file, variants[0].group)}
-                  </span>
-                </div>
-                {isOpen ? variants.map(({ file, group }) => (
-                  <div key={`${group}:${path}`} className="border-t border-border">
-                    <div className="group flex items-center justify-between bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground">
-                      <span>{group === "staged" ? "Staged" : group === "changes" ? "Working tree" : group === "untracked" ? "Untracked" : "Conflict"} · {path}</span>
-                    </div>
-                    <div className={view === "split" ? "overflow-x-auto" : ""}>
-                      <ChangePatch key={`${projectId}:${threadId}:${file.revision ?? ""}:${refreshDiffs}`} ctx={ctx} group={group} path={path} view={view} />
-                    </div>
-                  </div>
-                )) : null}
+                    {section.id === "staged" ? "Unstage all" : "Stage all"}
+                  </Button>
+                ) : null}
               </div>
-            );
-          })}
+              {!collapsedSections.has(section.id) ? section.entries.map(({ key, file, group }) => {
+                const path = file.path;
+                const parts = fileParts(path);
+                const isOpen = expanded.has(key);
+                const view = overrides[key] ?? layout;
+                const deleted = group === "staged" ? file.index === "D" : file.worktree === "D";
+                const additions = file.additions;
+                const deletions = file.deletions;
+                return (
+                  <div key={key} className="border-b border-border">
+                    <div className="group flex items-center gap-1 px-2 py-1 text-sm hover:bg-state-hover">
+                      <button
+                        type="button" aria-expanded={isOpen} aria-label={`${isOpen ? "Collapse" : "Expand"} ${path}`}
+                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                        onClick={() => toggle(key)}
+                      >
+                        <Icon name={isOpen ? "ChevronDown" : "ChevronRight"} className="size-3 shrink-0" />
+                        <span className="w-6 shrink-0 text-right font-mono text-[10px] text-sky-600 dark:text-sky-400">{extLabel(parts.name)}</span>
+                        <span className="min-w-0 truncate">{file.from ? `${fileParts(file.from).name} → ` : ""}{parts.name}</span>
+                        <span className="truncate text-xs text-muted-foreground">{parts.dir}</span>
+                      </button>
+                      <span
+                        className="flex shrink-0 gap-1 font-mono text-[10px]"
+                        aria-label={`${path}: ${additions ?? "unknown"} additions, ${deletions ?? "unknown"} deletions`}
+                        title={additions === null || deletions === null ? "Line counts unavailable for binary or conflicted changes" : undefined}
+                      >
+                        <span className="text-emerald-600 dark:text-emerald-400">+{additions ?? "?"}</span>
+                        <span className="text-red-600 dark:text-red-400">-{deletions ?? "?"}</span>
+                      </span>
+                      {rowActions(file, group)}
+                      <IconBtn
+                        label={`Edit ${path} in preferred editor`} name="EditFile" disabled={deleted}
+                        onClick={() => void editFile(path)}
+                      />
+                      <IconBtn
+                        label={`${view === "unified" ? "Split" : "Inline"} ${path}`}
+                        name={view === "unified" ? "Columns2" : "AlignLeft"}
+                        onClick={() => setOverrides((prev) => ({ ...prev, [key]: view === "unified" ? "split" : "unified" }))}
+                      />
+                      <span className={cn("w-8 shrink-0 text-right font-mono text-[10px]", letterClass(statusBadge(file, group)))}>
+                        {statusBadge(file, group)}
+                      </span>
+                    </div>
+                    {isOpen ? (
+                      <div className="border-t border-border">
+                        <div className="group flex items-center justify-between bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground">
+                          <span>{group === "staged" ? "Staged" : group === "changes" ? "Working tree" : group === "untracked" ? "Untracked" : "Conflict"} · {path}</span>
+                        </div>
+                        <div className={view === "split" ? "overflow-x-auto" : ""}>
+                          <ChangePatch key={`${projectId}:${threadId}:${file.revision ?? ""}:${refreshDiffs}`} ctx={ctx} group={group} path={path} view={view} />
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }) : null}
+            </section>
+          ))}
         </section>
       </div>
 

@@ -1,4 +1,26 @@
-import type { FileGroup, GitFile } from "../contract.ts";
+import type { FileGroup, GitFile, GitState } from "../contract.ts";
+
+/** Keep index and working-tree reviews separate, even for the same path. */
+export function changeSections(
+  state: Pick<GitState, "staged" | "changes" | "untracked" | "conflicts">,
+  scope: "all" | "staged" | "unstaged",
+) {
+  const sections: { id: "staged" | "unstaged" | "conflicts"; label: string; groups: FileGroup[] }[] = [
+    { id: "staged", label: "Staged", groups: ["staged"] },
+    { id: "unstaged", label: "Unstaged", groups: ["changes", "untracked"] },
+    { id: "conflicts", label: "Merge conflicts", groups: ["conflicts"] },
+  ];
+  return sections
+    .filter((section) => scope === "all" || section.id === scope)
+    .map((section) => ({
+      id: section.id,
+      label: section.label,
+      entries: section.groups.flatMap((group) => state[group].map((file) => ({
+        key: `${group}:${file.path}`, file, group,
+      }))),
+    }))
+    .filter((section) => section.entries.length > 0);
+}
 
 /** Right-edge SCM letter. Combined `¡M, M` only on Changes when both sides dirty. */
 export function statusBadge(file: GitFile, group: FileGroup): string {
