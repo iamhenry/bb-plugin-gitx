@@ -867,7 +867,10 @@ function ProjectGitSyncBanner({ projectId }: { projectId: string }) {
   if (state && (!state.present || !state.upstream)) return null;
   if (!checking && !error && !state) return null;
   const label = checking ? "⟳ Checking remote…"
-    : error ? `⚠ ${error.split("\n")[0].slice(0, 160)}`
+    : error ? error.includes("Pull is not fast-forward (branches have diverged). Merge or rebase outside Gitx.")
+      ? "⚠ Pull is not fast-forward (branches have diverged). Merge or rebase outside Gitx."
+      : /authentication failed|could not read username|could not read password|permission denied \(publickey\)|terminal prompts disabled/i.test(error)
+        ? "⚠ Remote needs sign-in" : "⚠ Couldn't reach the remote"
     : state!.ahead && state!.behind ? `⚠ ${state!.branch} has diverged (↑${state!.ahead} ↓${state!.behind})`
     : state!.behind ? `↓${state!.behind} ${state!.branch} is ${state!.behind} behind`
     : state!.ahead ? `↑${state!.ahead} ${state!.branch} has ${state!.ahead} unpushed`
@@ -877,7 +880,7 @@ function ProjectGitSyncBanner({ projectId }: { projectId: string }) {
     : null;
 
   return <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground" role="status">
-    {checking || action ? <span>{label}</span> : <button type="button" className="text-left hover:underline" onClick={() => void check()}>{label}</button>}
+    {checking || action ? <span>{label}</span> : <button type="button" className={`text-left hover:underline ${error ? "min-w-0 truncate" : ""}`} onClick={() => void check()}>{label}</button>}
     {action && <Button type="button" size="sm" variant="outline" onClick={() => void sync(action)}>{action === "pull" ? "Pull" : "Push"}</Button>}
   </div>;
 }
