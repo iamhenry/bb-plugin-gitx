@@ -4,6 +4,7 @@ import {
   experimental_ProviderModelPicker,
   useBbContext,
   useBbNavigate,
+  useComposerView,
   useRealtime,
   useRpc,
   type ExperimentalProviderModelPickerValue,
@@ -796,6 +797,91 @@ function NewThreadSourceControl({ projectId }: { projectId: string | null }) {
   return <SourceControl projectId={projectId} threadId={null} />;
 }
 
+function GitSyncBanner() {
+  const { scope } = useComposerView();
+  const projectId = scope.kind === "new-thread" ? scope.projectId : null;
+  return projectId ? <ProjectGitSyncBanner key={projectId} projectId={projectId} /> : null;
+}
+
+function ProjectGitSyncBanner({ projectId }: { projectId: string }) {
+  const rpc = useRpc<typeof gitxRpc>();
+  const [state, setState] = useState<GitState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(true);
+  const pending = useRef(false);
+  const active = useRef(false);
+  const ctx = useMemo(() => ({ projectId, threadId: null }), [projectId]);
+
+  const check = useCallback(async () => {
+    if (pending.current) return;
+    pending.current = true;
+    setChecking(true);
+    setError(null);
+    try {
+      const next = await rpc.call("fetch", { ...ctx, force: true });
+      if (active.current) setState(next);
+    } catch (reason) {
+      try {
+        const next = await rpc.call("getState", ctx);
+        if (active.current) setState(next);
+      } catch { /* Keep the original fetch error. */ }
+      if (active.current) setError(errMessage(reason));
+    } finally {
+      pending.current = false;
+      if (active.current) setChecking(false);
+    }
+  }, [rpc, ctx]);
+
+  useEffect(() => {
+    active.current = true;
+    void check();
+    return () => { active.current = false; };
+  }, [check]);
+
+  const refresh = useCallback(() => {
+    if (pending.current) return;
+    void rpc.call("getState", ctx).then((next) => {
+      if (active.current && !pending.current) setState(next);
+    }, (reason) => { if (active.current && !pending.current) setError(errMessage(reason)); });
+  }, [rpc, ctx]);
+  useRealtime(GIT_STATE_CHANNEL, refresh);
+
+  const sync = async (action: "pull" | "push") => {
+    if (pending.current) return;
+    pending.current = true;
+    setChecking(true);
+    setError(null);
+    try {
+      const next = await rpc.call(action, ctx);
+      if (active.current) setState(next);
+      const refreshed = await rpc.call("fetch", { ...ctx, force: true });
+      if (active.current) setState(refreshed);
+    } catch (reason) {
+      if (active.current) setError(errMessage(reason));
+    } finally {
+      pending.current = false;
+      if (active.current) setChecking(false);
+    }
+  };
+
+  if (state && (!state.present || !state.upstream)) return null;
+  if (!checking && !error && !state) return null;
+  const label = checking ? "⟳ Checking remote…"
+    : error ? `⚠ ${error.split("\n")[0].slice(0, 160)}`
+    : state!.ahead && state!.behind ? `⚠ ${state!.branch} has diverged (↑${state!.ahead} ↓${state!.behind})`
+    : state!.behind ? `↓${state!.behind} ${state!.branch} is ${state!.behind} behind`
+    : state!.ahead ? `↑${state!.ahead} ${state!.branch} has ${state!.ahead} unpushed`
+    : `✓ ${state!.branch} · up to date`;
+  const action = !checking && !error && state
+    ? state.behind && !state.ahead ? "pull" : state.ahead && !state.behind ? "push" : null
+    : null;
+
+  return <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground" role="status">
+    {checking || action ? <span>{label}</span> : <button type="button" className="text-left hover:underline" onClick={() => void check()}>{label}</button>}
+    {action && <Button type="button" size="sm" variant="outline" onClick={() => void sync(action)}>{action === "pull" ? "Pull" : "Push"}</Button>}
+  </div>;
+}
+
 function WalkthroughSettings() {
   const rpc = useRpc<typeof gitxRpc>();
   const [settings, setSettings] = useState<WalkthroughSettings | null>(null);
@@ -864,6 +950,11 @@ function WalkthroughSettings() {
 }
 
 export default definePluginApp((app) => {
+  app.composer.customize({
+    id: "git-sync",
+    scopes: ["new-thread"],
+    banners: [{ id: "git-sync", chrome: "bare", component: GitSyncBanner }],
+  });
   app.slots.navPanel({
     id: "source-control",
     title: "Source Control",

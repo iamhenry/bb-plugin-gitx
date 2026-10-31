@@ -65,28 +65,30 @@ export default function plugin(bb: BbPluginApi) {
 
   const runFetch = (cwd: string, force: boolean): Promise<void> => {
     const existing = inflightFetch.get(cwd);
-    if (existing) return existing;
+    if (existing) return force ? existing : existing.catch(() => {});
     if (!force) {
       const prev = lastFetch.get(cwd);
       if (prev !== undefined && Date.now() - prev < FETCH_THROTTLE_MS) {
         return Promise.resolve();
       }
     }
-    if (authBlocked.has(cwd)) return Promise.resolve();
+    if (!force && authBlocked.has(cwd)) return Promise.resolve();
     const job = withLock(async () => {
       try {
         await fetchAll(cwd);
+        authBlocked.delete(cwd);
         lastFetch.set(cwd, Date.now());
         signalChange();
       } catch (err) {
         if (err instanceof GitOpError && err.code === "auth") authBlocked.add(cwd);
         bb.log.warn(`fetch: ${String(err)}`);
+        throw err;
       }
     }).finally(() => {
       inflightFetch.delete(cwd);
     });
     inflightFetch.set(cwd, job);
-    return job;
+    return force ? job : job.catch(() => {});
   };
 
   const ensureWatch = (cwd: string) => {
